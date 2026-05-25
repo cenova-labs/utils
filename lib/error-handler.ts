@@ -1,5 +1,5 @@
 import { isFn, isObject, isStr, isPromise } from './validate'
-import type { Fn } from '../dist/types/helper'
+import type { Fn } from '../typings/helper'
 
 /**
  * Formats an error object into a string representation.
@@ -66,4 +66,3 @@ export const invokeWithErrorHandlingFactory = (handleError: Fn) => {
     return res
   }
 }
-
