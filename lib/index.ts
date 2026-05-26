@@ -1,6 +1,7 @@
 export * from './date'
 export * from './define'
 export * from './random'
+export * from './request'
 export * from './shard'
 export * from './string'
 export * from './url'
