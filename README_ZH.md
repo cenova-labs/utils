@@ -1,6 +1,6 @@
 # @cc-heart/utils
 
-[Docs](https://cc-hearts.github.io/utils/)
+[Docs](https://cenova-labs.github.io/utils/)
 
 一个 JavaScript 工具库
 
