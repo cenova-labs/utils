@@ -666,6 +666,14 @@ export class Request {
 
       // Return a promise that resolves when the stream ends
       return new Promise<T>((resolve, reject) => {
+        let abortHandler: (() => void) | undefined
+
+        const cleanup = () => {
+          if (abortHandler) {
+            controller.signal.removeEventListener('abort', abortHandler)
+          }
+        }
+
         const onClose = () => {
           cleanup()
           resolve(undefined as T)
@@ -674,16 +682,12 @@ export class Request {
           cleanup()
           reject(error)
         }
-        const onAbort = () => {
+        abortHandler = () => {
           cleanup()
           controller.abort()
         }
 
-        const cleanup = () => {
-          controller.signal.removeEventListener('abort', onAbort)
-        }
-
-        controller.signal.addEventListener('abort', onAbort)
+        controller.signal.addEventListener('abort', abortHandler)
 
         // Override callbacks to also resolve/reject the promise
         const originalOnClose = callbacks.onClose
