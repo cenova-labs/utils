@@ -165,6 +165,106 @@ interface RequestConfig {
 }
 ```
 
+## SSE (Server-Sent Events)
+
+支持 SSE 流式请求，基于 Fetch API 实现，相比原生 EventSource 有以下优势：
+- ✅ 支持自定义 Headers
+- ✅ 支持 POST 请求
+- ✅ 支持所有 HTTP 方法
+
+### 基础用法
+
+```ts
+import { Request } from '@cc-heart/utils'
+
+const api = new Request('https://api.example.com')
+
+// GET SSE
+const handle = api.sse('/events', {
+  onMessage(event) {
+    console.log('收到消息:', event.data)
+  },
+  onOpen() {
+    console.log('连接已建立')
+  },
+  onError(error) {
+    console.error('连接错误:', error)
+  },
+  onClose() {
+    console.log('连接已关闭')
+  }
+})
+
+// 取消连接
+handle.abort()
+```
+
+### POST SSE (如 AI 流式对话)
+
+```ts
+const handle = api.sse('/chat/completions', {
+  method: 'POST',
+  data: {
+    prompt: '你好',
+    model: 'gpt-4'
+  },
+  onMessage(event) {
+    // 解析 JSON 数据
+    try {
+      const data = JSON.parse(event.data)
+      console.log('AI 回复:', data.content)
+    } catch {
+      console.log('原始数据:', event.data)
+    }
+  },
+  onError(err) {
+    console.error('请求失败:', err)
+  }
+})
+```
+
+### 搭配拦截器使用
+
+```ts
+import type { RequestInterceptor } from '@cc-heart/utils'
+
+const addAuth: RequestInterceptor = (config) => ({
+  ...config,
+  headers: {
+    ...config.headers,
+    Authorization: `Bearer ${getToken()}`
+  }
+})
+
+const api = new Request('https://api.example.com')
+api.useRequestInterceptor(addAuth)
+
+// SSE 请求会自动携带拦截器添加的 Headers
+const handle = api.sse('/protected/events', {
+  onMessage(event) {
+    console.log(event.data)
+  }
+})
+```
+
+### SSE 类型定义
+
+```ts
+interface SSEMessageEvent {
+  event?: string    // 事件类型
+  data: string      // 消息数据
+  id?: string       // 最后事件 ID
+  retry?: number    // 重连间隔（毫秒）
+}
+
+interface SSECallbacks {
+  onMessage?: (event: SSEMessageEvent) => void
+  onOpen?: () => void
+  onError?: (error: unknown) => void
+  onClose?: () => void
+}
+```
+
 ## 返回类型
 
 ```ts

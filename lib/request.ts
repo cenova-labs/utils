@@ -34,6 +34,42 @@ export interface CacheConfig {
   ttl: number
 }
 
+// ─── SSE types ───
+
+/** SSE (Server-Sent Events) message event */
+export interface SSEMessageEvent {
+  /** Event type (from `event:` field) */
+  event?: string
+  /** Message data */
+  data: string
+  /** Last event ID (from `id:` field) */
+  id?: string
+  /** Retry interval in milliseconds (from `retry:` field) */
+  retry?: number
+}
+
+/** SSE event handler callbacks */
+export interface SSECallbacks {
+  /** Called when a message is received */
+  onMessage?: (event: SSEMessageEvent) => void
+  /** Called when the connection is opened */
+  onOpen?: () => void
+  /** Called when an error occurs */
+  onError?: (error: unknown) => void
+  /** Called when the connection is closed */
+  onClose?: () => void
+}
+
+/** SSE configuration */
+export interface SSEConfig extends SSECallbacks {
+  /** Enable SSE mode */
+  sse: true
+  /** Custom headers for SSE request */
+  headers?: Record<string, string>
+  /** Request body for POST SSE */
+  data?: unknown
+}
+
 // ─── Request config ───
 
 export interface RequestConfig extends RequestInit {
@@ -52,6 +88,8 @@ export interface RequestConfig extends RequestInit {
   cache?: boolean | CacheConfig
   /** Download progress callback. Receives (loadedBytes, totalBytes). */
   onDownloadProgress?: (loaded: number, total: number) => void
+  /** SSE configuration. Enables Server-Sent Events mode when provided. */
+  sse?: boolean | SSEConfig
 
   // ─── Lifecycle callbacks ───
   onSuccess?: (data: unknown) => void
@@ -418,6 +456,256 @@ export class Request {
 
     // unreachable
     throw new Error('Unreachable')
+  }
+
+  // ─── SSE Parser ───
+
+  private parseSSEStream(
+    response: Response,
+    callbacks: SSECallbacks,
+    controller: AbortController
+  ): void {
+    if (!response.body) {
+      callbacks.onError?.(new Error('Response body is empty'))
+      return
+    }
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let currentEvent: Partial<SSEMessageEvent> = {}
+
+    callbacks.onOpen?.()
+
+    const processBuffer = () => {
+      const lines = buffer.split('\n')
+      // Keep incomplete line in buffer
+      buffer = lines.pop() || ''
+
+      for (const line of lines) {
+        if (line === '') {
+          // Empty line = dispatch event
+          if (currentEvent.data !== undefined) {
+            callbacks.onMessage?.({
+              event: currentEvent.event,
+              data: currentEvent.data,
+              id: currentEvent.id,
+              retry: currentEvent.retry
+            })
+          }
+          currentEvent = {}
+        } else if (line.startsWith('data:')) {
+          const data = line.slice(5).trimStart()
+          currentEvent.data = currentEvent.data
+            ? currentEvent.data + '\n' + data
+            : data
+        } else if (line.startsWith('event:')) {
+          currentEvent.event = line.slice(6).trim()
+        } else if (line.startsWith('id:')) {
+          currentEvent.id = line.slice(3).trim()
+        } else if (line.startsWith('retry:')) {
+          const retry = parseInt(line.slice(6).trim(), 10)
+          if (!isNaN(retry)) {
+            currentEvent.retry = retry
+          }
+        }
+        // Lines starting with ':' are comments, ignore them
+      }
+    }
+
+    const read = async () => {
+      try {
+        while (true) {
+          if (controller.signal.aborted) {
+            reader.cancel()
+            callbacks.onClose?.()
+            return
+          }
+
+          const { done, value } = await reader.read()
+          if (done) {
+            // Process remaining buffer
+            processBuffer()
+            callbacks.onClose?.()
+            return
+          }
+
+          buffer += decoder.decode(value, { stream: true })
+          processBuffer()
+        }
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          callbacks.onError?.(error)
+        }
+        callbacks.onClose?.()
+      }
+    }
+
+    read()
+  }
+
+  // ─── SSE convenience method ───
+
+  /**
+   * Create an SSE (Server-Sent Events) connection.
+   *
+   * Uses Fetch API under the hood, so it supports:
+   * - Custom headers (unlike native EventSource)
+   * - POST requests
+   * - All HTTP methods
+   *
+   * @example
+   * ```ts
+   * const api = new Request('https://api.example.com')
+   *
+   * // GET SSE (default)
+   * const handle = api.sse('/events', {
+   *   onMessage: (event) => console.log(event.data),
+   *   onError: (err) => console.error(err),
+   * })
+   *
+   * // POST SSE with data
+   * const handle = api.sse('/chat/completions', {
+   *   method: 'POST',
+   *   data: { prompt: 'Hello' },
+   *   onMessage: (event) => {
+   *     const parsed = JSON.parse(event.data)
+   *     console.log(parsed)
+   *   },
+   * })
+   *
+   * // Cancel the connection
+   * handle.abort()
+   * ```n   */
+  sse<T = unknown>(
+    url: string,
+    config: Omit<RequestConfig, 'sse'> & SSECallbacks = {}
+  ): RequestHandle<T> {
+    const controller = new AbortController()
+    const { onMessage, onOpen, onError, onClose, ...requestConfig } = config
+
+    const callbacks: SSECallbacks = {
+      onMessage,
+      onOpen,
+      onError,
+      onClose
+    }
+
+    const promise = this.executeSSE<T>(
+      url,
+      requestConfig,
+      callbacks,
+      controller
+    )
+
+    const handle = {
+      then: (onfulfilled?: any, onrejected?: any) =>
+        (promise as Promise<T>).then(onfulfilled, onrejected),
+      catch: (onrejected?: any) =>
+        (promise as Promise<T>).catch(onrejected),
+      finally: (onfinally?: any) =>
+        (promise as Promise<T>).finally(onfinally),
+      abort: () => {
+        controller.abort()
+      }
+    } as RequestHandle<T>
+
+    return handle
+  }
+
+  private async executeSSE<T>(
+    url: string,
+    config: RequestConfig,
+    callbacks: SSECallbacks,
+    controller: AbortController
+  ): Promise<T> {
+    const {
+      params,
+      data,
+      requestInterceptors = [],
+      errorInterceptors = [],
+      timeout,
+      ...requestConfig
+    } = config
+
+    const method = (requestConfig.method ?? 'GET').toUpperCase()
+    const requestUrl = this.buildUrl(url, method, params)
+
+    let requestInit = this.buildRequestInit(
+      method,
+      data,
+      requestConfig,
+      controller
+    )
+
+    // Set SSE headers
+    requestInit.headers = {
+      Accept: 'text/event-stream',
+      ...this.normalizeHeaders(requestInit.headers)
+    }
+
+    try {
+      requestInit = await this.runRequestInterceptors(requestInit, [
+        ...this.requestInterceptors,
+        ...requestInterceptors
+      ])
+
+      const response = await fetch(requestUrl, requestInit)
+
+      if (!response.ok) {
+        throw new Error(`SSE connection failed: ${response.status} ${response.statusText}`)
+      }
+
+      const contentType = response.headers.get('content-type') ?? ''
+      if (!contentType.includes('text/event-stream')) {
+        throw new Error(`Expected text/event-stream, got ${contentType}`)
+      }
+
+      // Start parsing SSE stream
+      this.parseSSEStream(response, callbacks, controller)
+
+      // Return a promise that resolves when the stream ends
+      return new Promise<T>((resolve, reject) => {
+        const onClose = () => {
+          cleanup()
+          resolve(undefined as T)
+        }
+        const onError = (error: unknown) => {
+          cleanup()
+          reject(error)
+        }
+        const onAbort = () => {
+          cleanup()
+          controller.abort()
+        }
+
+        const cleanup = () => {
+          controller.signal.removeEventListener('abort', onAbort)
+        }
+
+        controller.signal.addEventListener('abort', onAbort)
+
+        // Override callbacks to also resolve/reject the promise
+        const originalOnClose = callbacks.onClose
+        const originalOnError = callbacks.onError
+
+        callbacks.onClose = () => {
+          originalOnClose?.()
+          onClose()
+        }
+        callbacks.onError = (error) => {
+          originalOnError?.(error)
+          onError(error)
+        }
+      })
+    } catch (error) {
+      const processedError = await this.runErrorInterceptors(error, [
+        ...this.errorInterceptors,
+        ...errorInterceptors
+      ])
+      callbacks.onError?.(processedError)
+      throw processedError
+    }
   }
 
   // ─── Progress reader ───
