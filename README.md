@@ -1,6 +1,6 @@
 # @cc-heart/utils
 
-[Docs](https://cenova-labs.github.io/utils/)
+[Docs](https://carlopenlab.github.io/utils/)
 
 A library of JavaScript tools
 
